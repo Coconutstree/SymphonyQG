@@ -2,7 +2,7 @@ import numpy as np
 from utils.preprocess import normalize
 from utils.io import fvecs_read, ivecs_write
 
-datasets = ["msong"]
+datasets = ["sift10m"]
 dis_type = "l2"
 
 if __name__ == "__main__":
