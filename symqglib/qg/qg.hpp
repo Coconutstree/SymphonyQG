@@ -2,11 +2,15 @@
 
 #include <omp.h>
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <cfloat>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <vector>
 
 #include "../common.hpp"
 #include "../quantization/rabitq.hpp"
@@ -22,14 +26,14 @@
 
 namespace symqg {
 /**
- * @brief this Factor only for illustration, the true storage is continous
- * degree_bound_*triple_x + degree_bound_*factor_dq + degree_bound_*factor_vq
+ * @brief this Factor only for illustration, the true storage is continuous
+ * norm_sqr + factor_dq + factor_vq per data vector
  *
  */
 struct Factor {
-    float triple_x;   // Sqr of distance to centroid + 2 * x * x1 / x0
-    float factor_dq;  // Factor of delta * ||q_r|| * (FastScanRes - sum_q)
-    float factor_vq;  // Factor of v_l * ||q_r||
+    float norm_sqr;   // Sqr of distance to global center
+    float factor_dq;  // Factor of delta * ||q_r - c0|| * (FastScanRes - sum_q)
+    float factor_vq;  // Factor of v_l * ||q_r - c0||
 };
 
 class QuantizedGraph {
@@ -54,6 +58,7 @@ class QuantizedGraph {
     FHTRotator rotator_;
     HashBasedBooleanSet visited_;
     buffer::SearchBuffer search_pool_;
+    std::vector<float, memory::AlignedAllocator<float>> center_;
 
     /*
      * Position of different data in each row
@@ -61,7 +66,9 @@ class QuantizedGraph {
      * Since we guarantee the degree for each vertex equals degree_bound (multiple of 32),
      * we do not need to store the degree for each vertex
      */
-    size_t code_offset_ = 0;      // pos of packed code
+    size_t code_offset_ = 0;       // pos of compact code
+    size_t code_storage_len_ = 0;  // length of compact code storage in floats
+    size_t compact_code_bytes_ = 0;
     size_t factor_offset_ = 0;    // pos of Factor
     size_t neighbor_offset_ = 0;  // pos of Neighbors
     size_t row_offset_ = 0;       // length of entire row
@@ -74,6 +81,8 @@ class QuantizedGraph {
     );
 
     void copy_vectors(const float*);
+    void set_global_center(const float*);
+    void quantize_vectors();
 
     [[nodiscard]] float* get_vector(PID data_id) {
         return &data_.at(row_offset_ * data_id);
@@ -162,7 +171,8 @@ inline QuantizedGraph::QuantizedGraph(size_t num, size_t max_deg, size_t dim)
     , scanner_(padded_dim_, degree_bound_)
     , rotator_(dimension_)
     , visited_(100)
-    , search_pool_(0) {
+    , search_pool_(0)
+    , center_(dimension_) {
     initialize();
 }
 
@@ -176,6 +186,41 @@ inline void QuantizedGraph::copy_vectors(const float* data) {
     std::cout << "\tVectors Copied\n";
 }
 
+inline void QuantizedGraph::set_global_center(const float* center) {
+    std::copy(center, center + dimension_, center_.begin());
+}
+
+inline void QuantizedGraph::quantize_vectors() {
+#pragma omp parallel for schedule(dynamic)
+    for (size_t i = 0; i < num_points_; ++i) {
+        const float* cur_data = get_vector(i);
+
+        std::vector<float, memory::AlignedAllocator<float>> residual(dimension_);
+        float residual_norm_sqr = 0.F;
+        for (size_t j = 0; j < dimension_; ++j) {
+            float cur_residual = cur_data[j] - center_[j];
+            residual[j] = cur_residual;
+            residual_norm_sqr += cur_residual * cur_residual;
+        }
+
+        float residual_norm = std::sqrt(residual_norm_sqr);
+        if (residual_norm > 0.F) {
+            float inv_norm = 1.F / residual_norm;
+            for (size_t j = 0; j < dimension_; ++j) {
+                residual[j] *= inv_norm;
+            }
+        }
+
+        std::vector<float, memory::AlignedAllocator<float>> rotated_unit(padded_dim_);
+        this->rotator_.rotate(residual.data(), rotated_unit.data());
+        std::memset(get_packed_code(i), 0, code_storage_len_ * sizeof(float));
+        rabitq_global_code(
+            rotated_unit.data(), residual_norm, padded_dim_, get_packed_code(i), get_factor(i)
+        );
+    }
+    std::cout << "\tVectors Quantized With Global Center\n";
+}
+
 inline void QuantizedGraph::save_index(const char* filename) const {
     std::cout << "Saving quantized graph to " << filename << '\n';
     std::ofstream output(filename, std::ios::binary);
@@ -186,6 +231,9 @@ inline void QuantizedGraph::save_index(const char* filename) const {
 
     /* Data */
     data_.save(output);
+
+    /* Global center */
+    output.write(reinterpret_cast<const char*>(center_.data()), sizeof(float) * dimension_);
 
     /* Rotator */
     this->rotator_.save(output);
@@ -206,7 +254,7 @@ inline void QuantizedGraph::load_index(const char* filename) {
     /* Check file size */
     size_t filesize = get_filesize(filename);
     size_t correct_size = sizeof(PID) + (sizeof(float) * num_points_ * row_offset_) +
-                          (sizeof(float) * padded_dim_);
+                          (sizeof(float) * dimension_) + (sizeof(float) * padded_dim_);
     if (filesize != correct_size) {
         std::cerr << "Index file size error! Please make sure the index and "
                      "init parameters are correct\n";
@@ -221,6 +269,9 @@ inline void QuantizedGraph::load_index(const char* filename) {
 
     /* Data */
     data_.load(input);
+
+    /* Global center */
+    input.read(reinterpret_cast<char*>(center_.data()), sizeof(float) * dimension_);
 
     /* Rotator */
     this->rotator_.load(input);
@@ -257,7 +308,7 @@ inline void QuantizedGraph::search_qg(
     const float* __restrict__ query, uint32_t knn, uint32_t* __restrict__ results
 ) {
     // query preparation
-    QGQuery q_obj(query, padded_dim_);
+    QGQuery q_obj(query, center_.data(), dimension_, padded_dim_);
     q_obj.query_prepare(rotator_, scanner_);
 
     /* Searching pool initialization */
@@ -301,28 +352,49 @@ inline float QuantizedGraph::scan_neighbors(
 ) const {
     float sqr_y = space::l2_sqr(q_obj.query_data(), cur_data, dimension_);
 
+    const PID* ptr_nb = reinterpret_cast<const PID*>(&cur_data[neighbor_offset_]);
+    std::vector<uint8_t> compact_codes(degree_bound_ * compact_code_bytes_, 0);
+    std::vector<uint8_t> packed_codes(degree_bound_ * compact_code_bytes_, 0);
+    std::vector<float> factor_block(kGlobalFactorSize * degree_bound_, 0.F);
+    float* norm_sqr = factor_block.data();
+    float* factor_dq = norm_sqr + degree_bound_;
+    float* factor_vq = factor_dq + degree_bound_;
+
+    for (uint32_t i = 0; i < cur_degree; ++i) {
+        PID cur_neighbor = ptr_nb[i];
+        std::memcpy(
+            &compact_codes[i * compact_code_bytes_],
+            get_packed_code(cur_neighbor),
+            compact_code_bytes_
+        );
+        const float* factor = get_factor(cur_neighbor);
+        norm_sqr[i] = factor[0];
+        factor_dq[i] = factor[1];
+        factor_vq[i] = factor[2];
+    }
+    pack_codes_helper(padded_dim_, compact_codes.data(), degree_bound_, packed_codes.data());
+
     /* Compute approximate distance by Fast Scan */
-    const auto* packed_code = reinterpret_cast<const uint8_t*>(&cur_data[code_offset_]);
-    const auto* factor = &cur_data[factor_offset_];
     this->scanner_.scan_neighbors(
         appro_dist,
         q_obj.lut().data(),
-        sqr_y,
+        q_obj.query_norm_sqr(),
+        q_obj.query_norm(),
         q_obj.lower_val(),
         q_obj.width(),
         q_obj.sumq(),
-        packed_code,
-        factor
+        packed_codes.data(),
+        factor_block.data()
     );
 
-    const PID* ptr_nb = reinterpret_cast<const PID*>(&cur_data[neighbor_offset_]);
     for (uint32_t i = 0; i < cur_degree; ++i) {
         PID cur_neighbor = ptr_nb[i];
         float tmp_dist = appro_dist[i];
 #if defined(DEBUG)
         std::cout << "Neighbor ID " << cur_neighbor << '\n';
         std::cout << "Appro " << appro_dist[i] << '\t';
-        float __gt_dist__ = l2_sqr(query, get_vector(cur_neighbor), dimension_);
+        float __gt_dist__ =
+            space::l2_sqr(q_obj.query_data(), get_vector(cur_neighbor), dimension_);
         std::cout << "GT " << __gt_dist__ << '\t';
         std::cout << "Error " << (appro_dist[i] - __gt_dist__) / __gt_dist__ << '\t';
         std::cout << "sqr_y " << sqr_y << '\n';
@@ -369,11 +441,11 @@ inline void QuantizedGraph::initialize() {
     assert(padded_dim_ % 64 == 0);
     assert(padded_dim_ >= dimension_);
 
-    this->code_offset_ = dimension_;  // Pos of packed code (aligned)
-    this->factor_offset_ =
-        code_offset_ + padded_dim_ / 64 * 2 * degree_bound_;  // Pos of Factor
-    this->neighbor_offset_ =
-        factor_offset_ + sizeof(Factor) * degree_bound_ / sizeof(float);
+    this->compact_code_bytes_ = padded_dim_ / 8;
+    this->code_storage_len_ = (compact_code_bytes_ + sizeof(float) - 1) / sizeof(float);
+    this->code_offset_ = dimension_;  // Pos of per-vector compact code
+    this->factor_offset_ = code_offset_ + code_storage_len_;  // Pos of per-vector Factor
+    this->neighbor_offset_ = factor_offset_ + kGlobalFactorSize;
     this->row_offset_ = neighbor_offset_ + degree_bound_;
 
     /* Allocate memory of data*/
@@ -392,7 +464,7 @@ inline void QuantizedGraph::find_candidates(
     const std::vector<uint32_t>& degrees
 ) const {
     const float* query = get_vector(cur_id);
-    QGQuery q_obj(query, padded_dim_);
+    QGQuery q_obj(query, center_.data(), dimension_, padded_dim_);
     q_obj.query_prepare(rotator_, scanner_);
 
     /* Searching pool initialization */
@@ -433,36 +505,5 @@ inline void QuantizedGraph::update_qg(
     for (size_t i = 0; i < cur_degree; ++i) {
         neighbor_ptr[i] = new_neighbors[i].id;
     }
-
-    RowMatrix<float> x_pad(cur_degree, padded_dim_);  // padded neighbors mat
-    RowMatrix<float> c_pad(1, padded_dim_);           // padded duplicate centroid mat
-    x_pad.setZero();
-    c_pad.setZero();
-
-    /* Copy data */
-    for (size_t i = 0; i < cur_degree; ++i) {
-        auto neighbor_id = new_neighbors[i].id;
-        const auto* cur_data = get_vector(neighbor_id);
-        std::copy(cur_data, cur_data + dimension_, &x_pad(static_cast<long>(i), 0));
-    }
-    const auto* cur_cent = get_vector(cur_id);
-    std::copy(cur_cent, cur_cent + dimension_, &c_pad(0, 0));
-
-    /* rotate Matrix */
-    RowMatrix<float> x_rotated(cur_degree, padded_dim_);
-    RowMatrix<float> c_rotated(1, padded_dim_);
-    for (long i = 0; i < static_cast<long>(cur_degree); ++i) {
-        this->rotator_.rotate(&x_pad(i, 0), &x_rotated(i, 0));
-    }
-    this->rotator_.rotate(&c_pad(0, 0), &c_rotated(0, 0));
-
-    // Get codes and factors for rabitq
-    float* fac_ptr = get_factor(cur_id);
-    float* triple_x = fac_ptr;
-    float* factor_dq = triple_x + this->degree_bound_;
-    float* factor_vq = factor_dq + this->degree_bound_;
-    rabitq_codes(
-        x_rotated, c_rotated, get_packed_code(cur_id), triple_x, factor_dq, factor_vq
-    );
 }
 }  // namespace symqg

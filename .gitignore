@@ -48,3 +48,5 @@ data/*/
 # python
 *.pyc
 __pycache__/
+# tar.gz结尾的就不用上传了
+*.tar.gz

@@ -94,33 +94,44 @@ static inline void pack_codes_helper(
     }
 }
 
+inline void binary_codes_to_byte_codes(
+    size_t padded_dim, const uint64_t* binary_code, size_t ncode, uint8_t* byte_codes
+);
+
 inline void pack_codes(
     size_t padded_dim, const uint64_t* binary_code, size_t ncode, uint8_t* blocks
 ) {
     size_t ncode_pad = (ncode + 31) & ~31;  // size_t ncode_pad = ((ncode + 31) / 32) * 32;
     std::vector<uint8_t> binary_code_8bit(ncode_pad * padded_dim / 8);
+    binary_codes_to_byte_codes(padded_dim, binary_code, ncode, binary_code_8bit.data());
+    pack_codes_helper(padded_dim, binary_code_8bit.data(), ncode, blocks);
+}
+
+inline void binary_codes_to_byte_codes(
+    size_t padded_dim, const uint64_t* binary_code, size_t ncode, uint8_t* byte_codes
+) {
+    std::memset(byte_codes, 0, ncode * padded_dim / 8);
     std::memcpy(
-        binary_code_8bit.data(), binary_code, ncode * padded_dim / 64 * sizeof(uint64_t)
+        byte_codes, binary_code, ncode * padded_dim / 64 * sizeof(uint64_t)
     );
 
     for (size_t i = 0; i < ncode; ++i) {
         for (size_t j = 0; j < padded_dim / 64; ++j) {
             for (size_t k = 0; k < 4; ++k) {
                 std::swap(
-                    binary_code_8bit[(i * padded_dim / 8) + (8 * j) + k],
-                    binary_code_8bit[(i * padded_dim / 8) + (8 * j) + 8 - k - 1]
+                    byte_codes[(i * padded_dim / 8) + (8 * j) + k],
+                    byte_codes[(i * padded_dim / 8) + (8 * j) + 8 - k - 1]
                 );
             }
         }
     }
 
     for (size_t i = 0; i < ncode * padded_dim / 8; ++i) {
-        uint8_t val = binary_code_8bit[i];
+        uint8_t val = byte_codes[i];
         uint8_t val_hi = (val >> 4);
         uint8_t val_lo = (val & 15);
-        binary_code_8bit[i] = (val_lo << 4) | val_hi;
+        byte_codes[i] = (val_lo << 4) | val_hi;
     }
-    pack_codes_helper(padded_dim, binary_code_8bit.data(), ncode, blocks);
 }
 
 // use fast scan to accumulate one block, dim % 16 == 0

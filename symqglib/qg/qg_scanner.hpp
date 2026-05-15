@@ -2,7 +2,9 @@
 
 #include <immintrin.h>
 
+#include <cstdlib>
 #include <cstdint>
+#include <iostream>
 #include <vector>
 
 #include "../quantization/fastscan_impl.hpp"
@@ -11,67 +13,72 @@ namespace symqg {
 
 static inline void appro_dist_impl(
     size_t num_points,
-    float sqr_y,
+    float query_norm_sqr,
+    float query_norm,
     float width,
     float vl,
     const float* __restrict__ result,
-    const float* __restrict__ triple_x,
+    const float* __restrict__ data_norm_sqr,
     const float* __restrict__ fac_dq,
     const float* __restrict__ fac_vq,
     float* __restrict__ appro_dist
 ) {
 #if defined(__AVX512F__)
-    const __m512 sqr_y_simd = _mm512_set1_ps(sqr_y);
+    const __m512 query_norm_sqr_simd = _mm512_set1_ps(query_norm_sqr);
+    const __m512 query_norm_simd = _mm512_set1_ps(query_norm);
     const __m512 width_simd = _mm512_set1_ps(width);
     const __m512 vl_simd = _mm512_set1_ps(vl);
 
     __m512 result_simd;
-    __m512 triple_x_simd;
+    __m512 data_norm_sqr_simd;
     __m512 fac_dq_simd;
     __m512 fac_vq_simd;
 
     for (size_t i = 0; i < num_points; i += 16) {
         result_simd = _mm512_loadu_ps(&result[i]);
-        triple_x_simd = _mm512_loadu_ps(&triple_x[i]);
+        data_norm_sqr_simd = _mm512_loadu_ps(&data_norm_sqr[i]);
         fac_dq_simd = _mm512_loadu_ps(&fac_dq[i]);
         fac_vq_simd = _mm512_loadu_ps(&fac_vq[i]);
 
-        triple_x_simd = _mm512_add_ps(triple_x_simd, sqr_y_simd);
+        data_norm_sqr_simd = _mm512_add_ps(data_norm_sqr_simd, query_norm_sqr_simd);
 
         fac_dq_simd = _mm512_mul_ps(fac_dq_simd, width_simd);
         fac_dq_simd = _mm512_mul_ps(fac_dq_simd, result_simd);
 
-        fac_vq_simd = _mm512_fmadd_ps(fac_vq_simd, vl_simd, triple_x_simd);
+        fac_vq_simd = _mm512_fmadd_ps(fac_vq_simd, vl_simd, fac_dq_simd);
+        fac_vq_simd = _mm512_mul_ps(fac_vq_simd, query_norm_simd);
 
-        triple_x_simd = _mm512_add_ps(fac_dq_simd, fac_vq_simd);
-        _mm512_storeu_ps(&appro_dist[i], triple_x_simd);
+        data_norm_sqr_simd = _mm512_add_ps(data_norm_sqr_simd, fac_vq_simd);
+        _mm512_storeu_ps(&appro_dist[i], data_norm_sqr_simd);
     }
 #elif defined(__AVX2__)
-    const __m256 sqr_y_simd = _mm256_set1_ps(sqr_y);
+    const __m256 query_norm_sqr_simd = _mm256_set1_ps(query_norm_sqr);
+    const __m256 query_norm_simd = _mm256_set1_ps(query_norm);
     const __m256 width_simd = _mm256_set1_ps(width);
     const __m256 vl_simd = _mm256_set1_ps(vl);
 
     __m256 result_simd;
-    __m256 triple_x_simd;
+    __m256 data_norm_sqr_simd;
     __m256 fac_dq_simd;
     __m256 fac_vq_simd;
 
     for (size_t i = 0; i < num_points; i += 8) {
         result_simd = _mm256_loadu_ps(&result[i]);
-        triple_x_simd = _mm256_loadu_ps(&triple_x[i]);
+        data_norm_sqr_simd = _mm256_loadu_ps(&data_norm_sqr[i]);
         fac_dq_simd = _mm256_loadu_ps(&fac_dq[i]);
         fac_vq_simd = _mm256_loadu_ps(&fac_vq[i]);
 
-        triple_x_simd = _mm256_add_ps(triple_x_simd, sqr_y_simd);
+        data_norm_sqr_simd = _mm256_add_ps(data_norm_sqr_simd, query_norm_sqr_simd);
 
         fac_dq_simd = _mm256_mul_ps(fac_dq_simd, width_simd);
         fac_dq_simd = _mm256_mul_ps(fac_dq_simd, result_simd);
 
         fac_vq_simd = _mm256_mul_ps(fac_vq_simd, vl_simd);
+        fac_vq_simd = _mm256_add_ps(fac_vq_simd, fac_dq_simd);
+        fac_vq_simd = _mm256_mul_ps(fac_vq_simd, query_norm_simd);
 
-        triple_x_simd =
-            _mm256_add_ps(_mm256_add_ps(triple_x_simd, fac_dq_simd), fac_vq_simd);
-        _mm256_storeu_ps(&appro_dist[i], triple_x_simd);
+        data_norm_sqr_simd = _mm256_add_ps(data_norm_sqr_simd, fac_vq_simd);
+        _mm256_storeu_ps(&appro_dist[i], data_norm_sqr_simd);
     }
     return;
 #else
@@ -99,7 +106,8 @@ class QGScanner {
     void scan_neighbors(
         float* __restrict__ appro_dist,
         const uint8_t* __restrict__ LUT,
-        float sqr_y,
+        float query_norm_sqr,
+        float query_norm,
         float vl,
         float width,
         int32_t sumq,
@@ -134,20 +142,21 @@ class QGScanner {
             _mm512_storeu_ps(&result_float[i + 16], f32b);
         }
 #else
-        for (size_t i = 0; i < D; ++i) {
+        for (size_t i = 0; i < degree_bound_; ++i) {
             result_float[i] = static_cast<float>((static_cast<int>(result[i]) << 1) - sumq);
         }
 #endif
-        const float* triple_x = factor;
-        const float* fac_dq = &triple_x[degree_bound_];
+        const float* data_norm_sqr = factor;
+        const float* fac_dq = &data_norm_sqr[degree_bound_];
         const float* fac_vq = &fac_dq[degree_bound_];
         appro_dist_impl(
             degree_bound_,
-            sqr_y,
+            query_norm_sqr,
+            query_norm,
             width,
             vl,
             result_float.data(),
-            triple_x,
+            data_norm_sqr,
             fac_dq,
             fac_vq,
             appro_dist

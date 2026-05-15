@@ -74,7 +74,9 @@ class QGBuilder {
         std::cout << "Setting entry_point to " << entry_point << '\n' << std::flush;
 
         qg_.set_ep(entry_point);
+        qg_.set_global_center(centroid.data());
         qg_.copy_vectors(data);
+        qg_.quantize_vectors();
 
         random_init();
     }

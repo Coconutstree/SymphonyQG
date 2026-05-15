@@ -10,6 +10,7 @@
 #include "./fastscan_impl.hpp"
 
 namespace symqg {
+constexpr size_t kGlobalFactorSize = 3;
 
 static inline void rabitq_factors(
     const RowMatrix<float>& rotated_data,
@@ -56,6 +57,43 @@ inline void rabitq_codes(
 
     // compute factors for RaBitQ
     rabitq_factors(rotated_data, rotated_centroid, bin_x, triple_x, factor_dq, factor_vq);
+}
+
+inline void rabitq_global_code(
+    const float* rotated_unit_data,
+    float residual_norm,
+    size_t dim,
+    uint8_t* compact_code,
+    float* factor
+) {
+    assert(dim % 64 == 0);
+
+    std::vector<int> bin_x(dim);
+    int signed_sum = 0;
+    for (size_t i = 0; i < dim; ++i) {
+        bin_x[i] = static_cast<int>(rotated_unit_data[i] > 0);
+        signed_sum += (bin_x[i] * 2) - 1;
+    }
+
+    std::vector<uint64_t> binary(dim / 64);
+    space::pack_binary(bin_x.data(), binary.data(), dim);
+    binary_codes_to_byte_codes(dim, binary.data(), 1, compact_code);
+
+    float fac_norm = 1.F / std::sqrt(static_cast<float>(dim));
+    float x0 = 0.F;
+    for (size_t i = 0; i < dim; ++i) {
+        x0 += rotated_unit_data[i] * static_cast<float>((bin_x[i] * 2) - 1) * fac_norm;
+    }
+
+    factor[0] = residual_norm * residual_norm;
+    if (residual_norm == 0.F || std::abs(x0) <= 1e-12F) {
+        factor[1] = 0.F;
+        factor[2] = 0.F;
+        return;
+    }
+
+    factor[1] = -2.F * residual_norm / x0 * fac_norm;
+    factor[2] = factor[1] * static_cast<float>(signed_sum);
 }
 
 static inline void rabitq_factors(
