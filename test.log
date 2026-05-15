@@ -1,0 +1,8 @@
+nohup: ignoring input
+Computing groundtruth for sift10m
+Reading File - ./data/sift10m/sift10m_base.fvecs
+	./data/sift10m/sift10m_base.fvecs readed
+Reading File - ./data/sift10m/sift10m_query.fvecs
+	./data/sift10m/sift10m_query.fvecs readed
+Writing File - ./data/sift10m/sift10m_groundtruth.ivecs
+	./data/sift10m/sift10m_groundtruth.ivecs wrote
