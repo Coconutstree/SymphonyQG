@@ -16,7 +16,7 @@ class QGQuery {
     const float* query_data_ = nullptr;
     const float* center_ = nullptr;
     std::vector<float, memory::AlignedAllocator<float>> normalized_residual_;
-    std::vector<uint8_t, memory::AlignedAllocator<uint8_t, 64>> lut_;
+    std::vector<uint8_t, memory::AlignedAllocator<uint8_t, 64>> byte_query_;
     size_t dimension_ = 0;
     size_t padded_dim_ = 0;
     float width_ = 0;
@@ -33,7 +33,7 @@ class QGQuery {
         : query_data_(q)
         , center_(center)
         , normalized_residual_(dimension)
-        , lut_(padded_dim << 2)  // padded_dim / 4 * 16
+        , byte_query_(padded_dim)
         , dimension_(dimension)
         , padded_dim_(padded_dim) {}
 
@@ -57,19 +57,24 @@ class QGQuery {
         rotator.rotate(normalized_residual_.data(), rd_query.data());
 
         // quantize query
-        std::vector<uint8_t, memory::AlignedAllocator<uint8_t, 64>> byte_query(padded_dim_);
         scalar::data_range(rd_query.data(), padded_dim_, lower_val_, upper_val_);
         width_ = (upper_val_ - lower_val_) / ((1 << QG_BQUERY) - 1);
         if (width_ <= 0.F) {
             lower_val_ = 0.F;
             width_ = 1.F;
         }
-        scalar::quantize(
-            byte_query.data(), rd_query.data(), padded_dim_, lower_val_, width_, sumq_
-        );
-
-        // pack lut
-        scanner.pack_lut(byte_query.data(), lut_.data());
+        float inv_width = 1.F / width_;
+        int32_t sumq = 0;
+        for (size_t i = 0; i < padded_dim_; ++i) {
+            int cur = static_cast<int>(
+                std::lround((rd_query[i] - lower_val_) * inv_width)
+            );
+            cur = std::min((1 << QG_BQUERY) - 1, std::max(0, cur));
+            byte_query_[i] = static_cast<uint8_t>(cur);
+            sumq += cur;
+        }
+        sumq_ = sumq;
+        (void)scanner;
     }
 
     [[nodiscard]] const float& width() const { return width_; }
@@ -82,9 +87,9 @@ class QGQuery {
 
     [[nodiscard]] const int32_t& sumq() const { return sumq_; }
 
-    [[nodiscard]] const std::vector<uint8_t, memory::AlignedAllocator<uint8_t, 64>>& lut(
+    [[nodiscard]] const std::vector<uint8_t, memory::AlignedAllocator<uint8_t, 64>>& query_code(
     ) const {
-        return lut_;
+        return byte_query_;
     }
 
     [[nodiscard]] const float* query_data() const { return query_data_; }

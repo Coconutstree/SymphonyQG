@@ -105,47 +105,29 @@ class QGScanner {
 
     void scan_neighbors(
         float* __restrict__ appro_dist,
-        const uint8_t* __restrict__ LUT,
+        const uint8_t* __restrict__ query_code,
         float query_norm_sqr,
         float query_norm,
         float vl,
         float width,
         int32_t sumq,
-        const uint8_t* packed_code,
+        const uint8_t* compact_code,
         const float* factor
     ) const {
-        std::vector<uint16_t> result(degree_bound_);
-
-        /* Compute block by block */
-        for (size_t i = 0; i < degree_bound_; i += kBatchSize) {
-            accumulate_impl(padded_dim_, packed_code, LUT, &result[i]);
-            packed_code = &packed_code[padded_dim_ << 2];
-        }
-
-        /* Cast to float and multiple by 2 then minus sumq */
+        (void)sumq;
         std::vector<float> result_float(degree_bound_);
-#if defined(__AVX512F__)
-        const __m512i qq = _mm512_set1_epi32(sumq);
-        for (size_t i = 0; i < degree_bound_; i += 32) {
-            __m256i i16a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&result[i]));
-            __m256i i16b =
-                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&result[i + 16]));
-            __m512i i32a = _mm512_cvtepi16_epi32(i16a);
-            __m512i i32b = _mm512_cvtepi16_epi32(i16b);
-
-            i32a = _mm512_sub_epi32(_mm512_slli_epi32(i32a, 1), qq);
-            i32b = _mm512_sub_epi32(_mm512_slli_epi32(i32b, 1), qq);
-            __m512 f32a = _mm512_cvtepi32_ps(i32a);
-            __m512 f32b = _mm512_cvtepi32_ps(i32b);
-
-            _mm512_storeu_ps(&result_float[i], f32a);
-            _mm512_storeu_ps(&result_float[i + 16], f32b);
+        for (size_t row = 0; row < degree_bound_; ++row) {
+            const uint8_t* code = compact_code + row * (padded_dim_ / 2);
+            uint32_t dot = 0;
+            for (size_t dim = 0; dim < padded_dim_; dim += 2) {
+                const uint8_t packed = code[dim / 2];
+                dot += static_cast<uint32_t>(query_code[dim]) *
+                       static_cast<uint32_t>(packed & 0x0F);
+                dot += static_cast<uint32_t>(query_code[dim + 1]) *
+                       static_cast<uint32_t>(packed >> 4);
+            }
+            result_float[row] = static_cast<float>(dot);
         }
-#else
-        for (size_t i = 0; i < degree_bound_; ++i) {
-            result_float[i] = static_cast<float>((static_cast<int>(result[i]) << 1) - sumq);
-        }
-#endif
         const float* data_norm_sqr = factor;
         const float* fac_dq = &data_norm_sqr[degree_bound_];
         const float* fac_vq = &fac_dq[degree_bound_];

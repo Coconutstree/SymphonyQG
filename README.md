@@ -91,9 +91,9 @@ index = symphonyqg.Index("QG", "L2", num_elements=N, dimension=D, degree_bound=3
 index.load("./test.index")
 ```
 
-## Global Fixed-Center Quantization
+## Global Fixed-Center Quantization with 4-bit ExRaBitQ
 
-This version stores RaBitQ codes with one global center `c_0`, chosen as the
+This version stores **4-bit ExRaBitQ codes** with one global center `c_0`, chosen as the
 centroid of all base vectors during index construction. Each data vector is
 quantized once as:
 
@@ -107,15 +107,24 @@ Queries are also normalized once per search:
 q = (q_r - c_0) / ||q_r - c_0||
 ```
 
+### 4-bit Multi-Bit Quantization
+
+Unlike the original 1-bit RaBitQ, this version uses **4-bit quantization** per dimension,
+which provides better accuracy with modest storage overhead. The algorithm uses a greedy
+enumeration approach to find the optimal scaling factor that maximizes the inner product
+with the original vector.
+
 As a result, each graph row stores only:
 
 ```text
-raw vector + one compact RaBitQ code + one factor triplet + neighbor ids
+raw vector + 4-bit compact codes + one factor triplet + neighbor ids
 ```
 
 It no longer stores one copy of the neighbors' quantization codes under every
 visited node. Old `.index` files built by the original per-node-center layout
 are not compatible with this layout and must be rebuilt.
+
+### Storage Format
 
 Let:
 
@@ -124,30 +133,51 @@ Let:
 * `B = 1 << ceil_log2(d)` be the padded dimension
 * `R = degree_bound`
 
-The persistent index size is:
+With **4-bit ExRaBitQ**, the persistent index size is:
 
 ```text
-4 * N * (d + ceil(B / 32) + 3 + R) + 4 * d + 4 * B + 4 bytes
+4 * N * (d + B/2 + 3 + R) + 4 * d + 4 * B + 4 bytes
 ```
 
-The terms are raw vectors, one compact code per vector, three per-vector
-RaBitQ factors, neighbor ids, the global center, the rotator, and the entry
-point. Compared with the original per-node-center storage:
+The terms are:
+- Raw vectors: `4 * N * d` bytes
+- 4-bit compact codes: `N * B/2` bytes (2 codes per byte)
+- Three per-vector ExRaBitQ factors: `4 * 3 * N` bytes
+- Neighbor ids: `4 * N * R` bytes
+- Global center: `4 * d` bytes
+- Rotator matrix: `4 * B` bytes
+- Entry point: 4 bytes
+
+Compared with the original 1-bit RaBitQ per-node-center storage:
 
 ```text
 4 * N * (d + R * (B / 32 + 4)) + 4 * B + 4 bytes
 ```
 
-the new layout saves approximately:
+The 4-bit version uses more space for quantization codes but maintains the same memory-efficient
+global-center layout, which saves approximately:
 
 ```text
 4 * N * (R - 1) * (B / 32 + 3) bytes
 ```
 
 
+## Quantization Details
+
+### 4-bit ExRaBitQ Algorithm
+
+The 4-bit ExRaBitQ quantization improves upon the 1-bit RaBitQ by:
+1. **Multi-bit representation**: Each dimension is quantized to 4 bits (range 0-15) instead of 1 bit
+2. **Greedy optimization**: Uses enumeration to find the optimal scaling factor `t` that maximizes
+   the inner product between the quantized code and the original vector
+3. **Better accuracy**: Achieves higher recall rates with improved precision-recall trade-offs
+
+For detailed algorithm description, refer to the [Extended-RaBitQ paper](https://arxiv.org/abs/2409.09913).
+
 ## Reproduce
 * For downloading datasets and preprocessing, please refer to `./data/README.md`
-* To build the new fixed-`c_0` indices and test query performance, please refer to `./reproduce/README.md` for details
+* To build the new fixed-`c_0` indices with 4-bit ExRaBitQ quantization and test query performance, 
+  please refer to `./reproduce/README.md` for details
 
 ## C++ examples
 ```bash

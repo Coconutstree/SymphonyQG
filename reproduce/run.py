@@ -37,9 +37,9 @@ def find_EFS(index, query, NQ):
                     total_correct += 1
 
         qps = NQ / total_time
-        recall = total_correct / total_num * 100
+        recall = total_correct / total_num
 
-        if recall > 99.8 or (recall - prev_recall) < 0.05 or qps < 10:
+        if recall > 0.998 or (recall - prev_recall) < 0.0005 or qps < 10:
             break
         prev_recall = recall
     return EFS
@@ -103,7 +103,7 @@ if __name__ == "__main__":
                                 total_correct += 1
 
                     qps = NQ / total_time
-                    recall = total_correct / total_num * 100
+                    recall = total_correct / total_num
                     QPS.append(qps)
                     RECALL.append(recall)
 

@@ -3,6 +3,7 @@ cmake_minimum_required (VERSION 3.10)
 project(SymphonyQG LANGUAGES CXX)
 
 set(CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 # AVX512 required
@@ -32,6 +33,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(EIGEN "-DEIGEN_DONT_PARALLELIZE")
 
-SET(CMAKE_CXX_FLAGS  "-Wall -Wextra -Ofast -lrt -march=native -fpic -fopenmp -ftree-vectorize -fexceptions ${TEMPLATE_CONSTANTS} ${EIGEN}")
+SET(CMAKE_CXX_FLAGS  "-std=c++17 -Wall -Wextra -Ofast -lrt -march=native -fpic -fopenmp -ftree-vectorize -fexceptions ${TEMPLATE_CONSTANTS} ${EIGEN}")
 
 add_subdirectory(test)

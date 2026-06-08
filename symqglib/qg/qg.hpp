@@ -14,6 +14,7 @@
 
 #include "../common.hpp"
 #include "../quantization/rabitq.hpp"
+#include "../quantization/exrabitq.hpp"
 #include "../space/l2.hpp"
 #include "../third/ngt/hashset.hpp"
 #include "../third/svs/array.hpp"
@@ -40,6 +41,9 @@ class QuantizedGraph {
     friend class QGBuilder;
 
    private:
+    static constexpr uint64_t kIndexMagic = 0x5147324558424954ULL;  // "QG2EXBIT"
+    static constexpr uint32_t kIndexVersion = 2;
+
     size_t num_points_ = 0;    // num points
     size_t degree_bound_ = 0;  // degree bound
     size_t dimension_ = 0;     // dimension
@@ -214,7 +218,7 @@ inline void QuantizedGraph::quantize_vectors() {
         std::vector<float, memory::AlignedAllocator<float>> rotated_unit(padded_dim_);
         this->rotator_.rotate(residual.data(), rotated_unit.data());
         std::memset(get_packed_code(i), 0, code_storage_len_ * sizeof(float));
-        rabitq_global_code(
+        exrabitq_global_code(
             rotated_unit.data(), residual_norm, padded_dim_, get_packed_code(i), get_factor(i)
         );
     }
@@ -227,6 +231,10 @@ inline void QuantizedGraph::save_index(const char* filename) const {
     assert(output.is_open());
 
     /* Basic variants */
+    const uint64_t magic = kIndexMagic;
+    const uint32_t version = kIndexVersion;
+    output.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    output.write(reinterpret_cast<const char*>(&version), sizeof(version));
     output.write(reinterpret_cast<const char*>(&entry_point_), sizeof(PID));
 
     /* Data */
@@ -253,11 +261,13 @@ inline void QuantizedGraph::load_index(const char* filename) {
 
     /* Check file size */
     size_t filesize = get_filesize(filename);
-    size_t correct_size = sizeof(PID) + (sizeof(float) * num_points_ * row_offset_) +
+    size_t correct_size = sizeof(kIndexMagic) + sizeof(kIndexVersion) + sizeof(PID) +
+                          (sizeof(float) * num_points_ * row_offset_) +
                           (sizeof(float) * dimension_) + (sizeof(float) * padded_dim_);
     if (filesize != correct_size) {
         std::cerr << "Index file size error! Please make sure the index and "
-                     "init parameters are correct\n";
+                     "init parameters are correct. Old SymphonyQG index files "
+                     "are not compatible with the 4-bit ExRaBitQ format; please rebuild.\n";
         abort();
     }
 
@@ -265,6 +275,16 @@ inline void QuantizedGraph::load_index(const char* filename) {
     assert(input.is_open());
 
     /* Basic variants */
+    uint64_t magic = 0;
+    uint32_t version = 0;
+    input.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    input.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (magic != kIndexMagic || version != kIndexVersion) {
+        std::cerr << "Unsupported SymphonyQG index format. Expected 4-bit ExRaBitQ "
+                     "index version "
+                  << kIndexVersion << "; please rebuild the index.\n";
+        abort();
+    }
     input.read(reinterpret_cast<char*>(&entry_point_), sizeof(PID));
 
     /* Data */
@@ -354,7 +374,6 @@ inline float QuantizedGraph::scan_neighbors(
 
     const PID* ptr_nb = reinterpret_cast<const PID*>(&cur_data[neighbor_offset_]);
     std::vector<uint8_t> compact_codes(degree_bound_ * compact_code_bytes_, 0);
-    std::vector<uint8_t> packed_codes(degree_bound_ * compact_code_bytes_, 0);
     std::vector<float> factor_block(kGlobalFactorSize * degree_bound_, 0.F);
     float* norm_sqr = factor_block.data();
     float* factor_dq = norm_sqr + degree_bound_;
@@ -372,18 +391,17 @@ inline float QuantizedGraph::scan_neighbors(
         factor_dq[i] = factor[1];
         factor_vq[i] = factor[2];
     }
-    pack_codes_helper(padded_dim_, compact_codes.data(), degree_bound_, packed_codes.data());
 
-    /* Compute approximate distance by Fast Scan */
+    /* Compute approximate distance by 4-bit scalar-code accumulation */
     this->scanner_.scan_neighbors(
         appro_dist,
-        q_obj.lut().data(),
+        q_obj.query_code().data(),
         q_obj.query_norm_sqr(),
         q_obj.query_norm(),
         q_obj.lower_val(),
         q_obj.width(),
         q_obj.sumq(),
-        packed_codes.data(),
+        compact_codes.data(),
         factor_block.data()
     );
 
@@ -441,7 +459,7 @@ inline void QuantizedGraph::initialize() {
     assert(padded_dim_ % 64 == 0);
     assert(padded_dim_ >= dimension_);
 
-    this->compact_code_bytes_ = padded_dim_ / 8;
+    this->compact_code_bytes_ = padded_dim_ / 2;  // 4-bit ExRaBitQ: 2 codes per byte
     this->code_storage_len_ = (compact_code_bytes_ + sizeof(float) - 1) / sizeof(float);
     this->code_offset_ = dimension_;  // Pos of per-vector compact code
     this->factor_offset_ = code_offset_ + code_storage_len_;  // Pos of per-vector Factor
