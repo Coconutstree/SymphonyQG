@@ -45,6 +45,10 @@ dist/
 data/*/
 .cache/
 
+# generated benchmark artifacts
+*.index
+*.log
+
 # python
 *.pyc
 __pycache__/

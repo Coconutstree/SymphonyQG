@@ -1,3 +1,14 @@
 set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
 
 add_executable(indexing indexing.cpp)
+
+add_executable(dbpedia_compare dbpedia_compare.cpp)
+target_compile_features(dbpedia_compare PRIVATE cxx_std_17)
+
+add_executable(dbpedia_compare_d64 dbpedia_compare.cpp)
+target_compile_features(dbpedia_compare_d64 PRIVATE cxx_std_17)
+target_compile_definitions(dbpedia_compare_d64 PRIVATE SYMQG_DEGREE=64)
+
+add_executable(dbpedia_compare_d128 dbpedia_compare.cpp)
+target_compile_features(dbpedia_compare_d128 PRIVATE cxx_std_17)
+target_compile_definitions(dbpedia_compare_d128 PRIVATE SYMQG_DEGREE=128)
